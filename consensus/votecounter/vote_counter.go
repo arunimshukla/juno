@@ -163,7 +163,8 @@ func (v *VoteCounter[V, H, A]) HasFuturePrecommitQuorum(
 	}
 
 	// The precommits are weighted at their own height; use that height's validator set for quorum too.
-	return roundData.countVote(Precommit, id) >= q(v.validators.TotalVotingPower(height))
+	totalVotingPower := v.validators.TotalVotingPower(height)
+	return totalVotingPower > 0 && roundData.countVote(Precommit, id) >= q(totalVotingPower)
 }
 
 func (v *VoteCounter[V, H, A]) HasNonFaultyFutureMessage(round types.Round) bool {
