@@ -266,9 +266,9 @@ func TestFuturePrecommitQuorumUsesFutureValidatorSet(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			validators := changingValidatorSet{
-				mockValidator:    newMockValidator(0, test.currentPower),
-				futureHeight:     testHeight + 1,
-				futureVotingPower: test.futurePower,
+				mockValidator:	newMockValidator(0, test.currentPower),
+				futureHeight:		testHeight + 1,
+				futureVotingPower:	test.futurePower,
 			}
 			counter := New[starknet.Value](validators, testHeight)
 			for i := range uint64(3) {
