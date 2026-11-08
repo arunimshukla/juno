@@ -1247,6 +1247,21 @@ func TestSubscribeNewHeadsErrorCases(t *testing.T) {
 	})
 }
 
+func storeNewHead(
+	t *testing.T, database db.KeyValueStore, header *core.Header, commitments *core.BlockCommitments,
+) {
+	t.Helper()
+	require.NoError(t, database.Write(func(batch db.Batch) error {
+		if err := core.WriteBlockHeader(batch, header); err != nil {
+			return err
+		}
+		if err := core.BlockCommitmentsBucket.Put(batch, header.Number, commitments); err != nil {
+			return err
+		}
+		return core.ChainHeightBucket.Put(batch, struct{}{}, &header.Number)
+	}))
+}
+
 func TestSubscribeNewHeads(t *testing.T) {
 	logger := log.NewNopZapLogger()
 	client := feeder.NewTestClient(t, &networks.Sepolia)
@@ -1259,16 +1274,12 @@ func TestSubscribeNewHeads(t *testing.T) {
 	block3, commitments3, _ := GetTestBlockWithCommitments(t, client, blockNumber3)
 	block3WithBloom := newBlockWithBloom(block3)
 
-	mockCtrl := gomock.NewController(t)
-	t.Cleanup(mockCtrl.Finish)
+	database := memory.New()
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	chain := blockchain.New(database, &networks.Sepolia)
+	handler := New(chain, nil, nil, logger)
 
-	mockChain := mocks.NewMockReader(mockCtrl)
-	handler := New(mockChain, nil, nil, logger)
-
-	mockChain.EXPECT().Height().Return(block1.Number, nil)
-
-	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
-	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
+	storeNewHead(t, database, block1.Header, commitments1)
 	blockIDLatest := BlockIDLatest()
 	subID, conn := createTestNewHeadsWebsocket(
 		t,
@@ -1280,13 +1291,13 @@ func TestSubscribeNewHeads(t *testing.T) {
 	adaptedHeader := AdaptBlockHeader(block1.Header, commitments1)
 	assertNextHead(t, conn, subID, &adaptedHeader)
 	// Receive new block
-	mockChain.EXPECT().BlockCommitmentsByNumber(block2.Number).Return(commitments2, nil)
+	storeNewHead(t, database, block2.Header, commitments2)
 
 	handler.newHeads.Send(block2WithBloom)
 	adaptedHeader2 := AdaptBlockHeader(block2.Header, commitments2)
 	assertNextHead(t, conn, subID, &adaptedHeader2)
 	// Receive new block
-	mockChain.EXPECT().BlockCommitmentsByNumber(block3.Number).Return(commitments3, nil)
+	storeNewHead(t, database, block3.Header, commitments3)
 
 	handler.newHeads.Send(block3WithBloom)
 	adaptedHeader3 := AdaptBlockHeader(block3.Header, commitments3)
@@ -1304,18 +1315,13 @@ func TestSubscribeNewHeadsHistorical(t *testing.T) {
 	block3, commitments3, _ := GetTestBlockWithCommitments(t, client, blockNumber3)
 	block3WithBloom := newBlockWithBloom(block3)
 
-	mockCtrl := gomock.NewController(t)
-	t.Cleanup(mockCtrl.Finish)
+	database := memory.New()
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	chain := blockchain.New(database, &networks.Sepolia)
+	handler := New(chain, nil, nil, logger)
 
-	mockChain := mocks.NewMockReader(mockCtrl)
-	handler := New(mockChain, nil, nil, logger)
-
-	mockChain.EXPECT().Height().Return(block2.Number, nil)
-	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
-	mockChain.EXPECT().BlockHeaderByNumber(block2.Number).Return(block2.Header, nil)
-
-	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
-	mockChain.EXPECT().BlockCommitmentsByNumber(block2.Number).Return(commitments2, nil)
+	storeNewHead(t, database, block1.Header, commitments1)
+	storeNewHead(t, database, block2.Header, commitments2)
 
 	blockID := BlockIDFromNumber(block1.Number)
 	subID, conn := createTestNewHeadsWebsocket(
@@ -1331,7 +1337,7 @@ func TestSubscribeNewHeadsHistorical(t *testing.T) {
 	adaptedHeader2 := AdaptBlockHeader(block2.Header, commitments2)
 	assertNextHead(t, conn, subID, &adaptedHeader2)
 
-	mockChain.EXPECT().BlockCommitmentsByNumber(block3.Number).Return(commitments3, nil)
+	storeNewHead(t, database, block3.Header, commitments3)
 
 	// Receive new block
 	handler.newHeads.Send(block3WithBloom)
@@ -1347,19 +1353,13 @@ func TestSubscribeNewHeadsHistoricalByHash(t *testing.T) {
 	block1, commitments1, _ := GetTestBlockWithCommitments(t, client, blockNumber1)
 	block2, commitments2, _ := GetTestBlockWithCommitments(t, client, blockNumber2)
 
-	mockCtrl := gomock.NewController(t)
-	t.Cleanup(mockCtrl.Finish)
+	database := memory.New()
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	chain := blockchain.New(database, &networks.Sepolia)
+	handler := New(chain, nil, nil, logger)
 
-	mockChain := mocks.NewMockReader(mockCtrl)
-	handler := New(mockChain, nil, nil, logger)
-
-	mockChain.EXPECT().Height().Return(block2.Number, nil)
-	mockChain.EXPECT().BlockNumberByHash(block1.Hash).Return(block1.Number, nil)
-	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
-	mockChain.EXPECT().BlockHeaderByNumber(block2.Number).Return(block2.Header, nil)
-
-	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
-	mockChain.EXPECT().BlockCommitmentsByNumber(block2.Number).Return(commitments2, nil)
+	storeNewHead(t, database, block1.Header, commitments1)
+	storeNewHead(t, database, block2.Header, commitments2)
 
 	blockID := BlockIDFromHash(block1.Hash)
 	subID, conn := createTestNewHeadsWebsocket(
@@ -1383,16 +1383,12 @@ func TestSubscribeNewHeadsReturnsReorgNotification(t *testing.T) {
 	blockNumber1 := uint64(56377)
 	block1, commitments1, _ := GetTestBlockWithCommitments(t, client, blockNumber1)
 
-	mockCtrl := gomock.NewController(t)
-	t.Cleanup(mockCtrl.Finish)
+	database := memory.New()
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	chain := blockchain.New(database, &networks.Sepolia)
+	handler := New(chain, nil, nil, logger)
 
-	mockChain := mocks.NewMockReader(mockCtrl)
-	handler := New(mockChain, nil, nil, logger)
-
-	mockChain.EXPECT().Height().Return(block1.Number, nil)
-
-	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
-	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
+	storeNewHead(t, database, block1.Header, commitments1)
 	blockIDLatest := BlockIDLatest()
 	subID, conn := createTestNewHeadsWebsocket(
 		t,
@@ -1411,6 +1407,11 @@ func TestSubscribeNewHeadsReturnsReorgNotification(t *testing.T) {
 		EndBlockHash:   block1.Hash,
 		EndBlockNum:    block1.Number,
 	}
+	replacement := *block1
+	header := *block1.Header
+	header.Hash = felt.NewFromUint64[felt.Felt](1)
+	replacement.Header = &header
+	storeNewHead(t, database, replacement.Header, commitments1)
 	handler.reorgs.Send(&reorg)
 	expectedReorgEvent := ReorgEvent{
 		StartBlockHash: reorg.StartBlockHash,
@@ -1421,9 +1422,7 @@ func TestSubscribeNewHeadsReturnsReorgNotification(t *testing.T) {
 	assertNextReorg(t, conn, subID, &expectedReorgEvent)
 
 	// Keep receiving incoming heads
-	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
-	handler.newHeads.Send(newBlockWithBloom(block1))
-	adaptedHeader2 := AdaptBlockHeader(block1.Header, commitments1)
+	adaptedHeader2 := AdaptBlockHeader(replacement.Header, commitments1)
 	assertNextHead(t, conn, subID, &adaptedHeader2)
 }
 
@@ -1437,15 +1436,12 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 	block2, commitments2, _ := GetTestBlockWithCommitments(t, client, blockNumber2)
 	block2WithBloom := newBlockWithBloom(block2)
 
-	mockCtrl := gomock.NewController(t)
-	t.Cleanup(mockCtrl.Finish)
+	database := memory.New()
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	chain := blockchain.New(database, &networks.Sepolia)
+	handler := New(chain, nil, nil, logger)
 
-	mockChain := mocks.NewMockReader(mockCtrl)
-	handler := New(mockChain, nil, nil, logger)
-
-	mockChain.EXPECT().Height().Return(block1.Number, nil).Times(2)
-	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil).Times(2)
-	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil).Times(2)
+	storeNewHead(t, database, block1.Header, commitments1)
 
 	blockIDLatest := SubscriptionBlockID(BlockIDLatest())
 	// Create two subscriber
@@ -1458,7 +1454,7 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 	assertNextHead(t, conn2, subID2, &adaptedHeader1)
 
 	// Both subscribers receives new block
-	mockChain.EXPECT().BlockCommitmentsByNumber(block2.Number).Return(commitments2, nil).Times(2)
+	storeNewHead(t, database, block2.Header, commitments2)
 	handler.newHeads.Send(block2WithBloom)
 
 	adaptedHeader2 := AdaptBlockHeader(block2.Header, commitments2)

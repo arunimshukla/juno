@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/NethermindEth/juno/db"
+	junogrpc "github.com/NethermindEth/juno/grpc"
 	"github.com/NethermindEth/juno/grpc/gen"
 	"github.com/NethermindEth/juno/utils/log"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 var _ db.KeyValueStore = (*DB)(nil)
@@ -53,10 +56,14 @@ func (d *DB) Path() string {
 }
 
 func (d *DB) NewTransaction(write bool) (*transaction, error) {
+	return d.newTransaction(d.ctx, write)
+}
+
+func (d *DB) newTransaction(ctx context.Context, write bool) (*transaction, error) {
 	defer d.listener.OnIO(write, time.Now())
 
 	// Every transaction owns a stream, so it needs its own context to release it.
-	ctx, cancel := context.WithCancel(d.ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	txClient, err := d.kvClient.Tx(
 		ctx,
 		grpc.MaxCallSendMsgSize(math.MaxInt),
@@ -189,6 +196,28 @@ func (d *DB) NewSnapshot() db.Snapshot {
 	}
 
 	return txn
+}
+
+func (d *DB) OpenSnapshot(ctx context.Context) (db.Snapshot, error) {
+	ctx = metadata.AppendToOutgoingContext(ctx, junogrpc.SnapshotMetadataKey, "1")
+	txn, err := d.newTransaction(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	// An older server only sends response headers after the first request.
+	err = txn.Get([]byte(junogrpc.SnapshotMetadataKey), func([]byte) error { return nil })
+	if err != nil && !errors.Is(err, db.ErrKeyNotFound) {
+		return nil, errors.Join(err, txn.Close())
+	}
+	headers, err := txn.client.Header()
+	if err != nil {
+		return nil, errors.Join(err, txn.Close())
+	}
+	if !slices.Contains(headers.Get(junogrpc.SnapshotMetadataKey), "1") {
+		err := errors.New("remote database does not support consistent snapshots")
+		return nil, errors.Join(err, txn.Close())
+	}
+	return txn, nil
 }
 
 func (d *DB) WithListener(listener db.EventListener) db.KeyValueStore {

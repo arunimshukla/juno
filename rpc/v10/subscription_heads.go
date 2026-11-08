@@ -4,7 +4,9 @@ import (
 	"context"
 
 	"github.com/NethermindEth/juno/core"
+	"github.com/NethermindEth/juno/core/felt"
 	"github.com/NethermindEth/juno/jsonrpc"
+	"github.com/NethermindEth/juno/rpc/rpccore"
 	"github.com/NethermindEth/juno/sync"
 )
 
@@ -29,85 +31,34 @@ func (h *Handler) SubscribeNewHeads(
 		return "", rpcErr
 	}
 
-	return h.subscribe(wsConn, newHeadsSubscriber(h, wsConn, startBlock, latestBlock))
-}
-
-type headsSubscriberState struct {
-	handler *Handler
-	conn    jsonrpc.Conn
-}
-
-func newHeadsSubscriber(
-	h *Handler,
-	conn jsonrpc.Conn,
-	startBlock,
-	latestBlock uint64,
-) subscriber {
-	state := &headsSubscriberState{handler: h, conn: conn}
-
-	return subscriber{
+	var startHash *felt.Felt
+	if blockID != nil && blockID.IsHash() {
+		startHash = blockID.Hash()
+	}
+	stream := rpccore.NewHeadStream(h.bcReader, startBlock, latestBlock, startHash, true)
+	catchUp := func(ctx context.Context, id string) error {
+		return stream.CatchUp(
+			ctx,
+			func(header *core.Header, commitments *core.BlockCommitments) error {
+				adaptedHeader := AdaptBlockHeader(header, commitments)
+				return sendHeader(wsConn, &adaptedHeader, id)
+			},
+			func(reorg *sync.ReorgBlockRange) error { return sendReorg(wsConn, reorg, id) },
+		)
+	}
+	return h.subscribe(wsConn, subscriber{
 		onStart: func(ctx context.Context, id string, _ *subscription, _ any) error {
-			return state.sendHistoricalHeaders(ctx, id, startBlock, latestBlock)
+			return catchUp(ctx, id)
 		},
-		onReorg:   state.onReorg,
-		onNewHead: state.onNewHead,
-	}
-}
-
-func (s *headsSubscriberState) onReorg(
-	_ context.Context,
-	id string,
-	_ *subscription,
-	reorg *sync.ReorgBlockRange,
-) error {
-	return sendReorg(s.conn, reorg, id)
-}
-
-func (s *headsSubscriberState) onNewHead(
-	_ context.Context,
-	id string,
-	_ *subscription,
-	headWithBloom *core.WithBloom[*core.Block],
-) error {
-	head := headWithBloom.Value
-	commitments, err := s.handler.bcReader.BlockCommitmentsByNumber(head.Number)
-	if err != nil {
-		return err
-	}
-
-	adaptedHeader := AdaptBlockHeader(head.Header, commitments)
-	return sendHeader(s.conn, &adaptedHeader, id)
-}
-
-func (s *headsSubscriberState) sendHistoricalHeaders(
-	ctx context.Context,
-	id string,
-	startBlock,
-	latestBlock uint64,
-) error {
-	for currentBlock := startBlock; currentBlock <= latestBlock; currentBlock++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		commitments, err := s.handler.bcReader.BlockCommitmentsByNumber(currentBlock)
-		if err != nil {
-			return err
-		}
-
-		currentHeader, err := s.handler.bcReader.BlockHeaderByNumber(currentBlock)
-		if err != nil {
-			return err
-		}
-
-		adaptedHeader := AdaptBlockHeader(currentHeader, commitments)
-		if err = sendHeader(s.conn, &adaptedHeader, id); err != nil {
-			return err
-		}
-	}
-	return nil
+		onReorg: func(ctx context.Context, id string, _ *subscription, _ *sync.ReorgBlockRange) error {
+			return catchUp(ctx, id)
+		},
+		onNewHead: func(
+			ctx context.Context, id string, _ *subscription, _ *core.WithBloom[*core.Block],
+		) error {
+			return catchUp(ctx, id)
+		},
+	})
 }
 
 func sendHeader(wsConn jsonrpc.Conn, header *BlockHeader, id string) error {

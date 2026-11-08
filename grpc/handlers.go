@@ -11,8 +11,12 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/NethermindEth/juno/db"
 	"github.com/NethermindEth/juno/grpc/gen"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
+
+// SnapshotMetadataKey requests and acknowledges a consistent read-only transaction.
+const SnapshotMetadataKey = "juno-db-snapshot"
 
 type Handler struct {
 	gen.UnimplementedKVServer
@@ -41,7 +45,20 @@ func (h Handler) Version(ctx context.Context, _ *emptypb.Empty) (*gen.VersionRep
 }
 
 func (h Handler) Tx(server gen.KV_TxServer) error {
-	dbTx := h.db.NewIndexedBatch()
+	var dbTx db.Snapshot
+	if slices.Contains(metadata.ValueFromIncomingContext(server.Context(), SnapshotMetadataKey), "1") {
+		snapshot, err := db.OpenSnapshot(server.Context(), h.db)
+		if err != nil {
+			return err
+		}
+		if err := server.SendHeader(metadata.Pairs(SnapshotMetadataKey, "1")); err != nil {
+			return errors.Join(err, snapshot.Close())
+		}
+		dbTx = snapshot
+	} else {
+		//nolint:staticcheck // Keep the original read semantics for legacy transactions.
+		dbTx = h.db.NewIndexedBatch()
+	}
 	tx := newTx(dbTx)
 
 	for {

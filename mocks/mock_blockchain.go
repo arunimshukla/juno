@@ -10,6 +10,7 @@
 package mocks
 
 import (
+	context "context"
 	reflect "reflect"
 
 	blockchain "github.com/NethermindEth/juno/blockchain"
@@ -298,6 +299,21 @@ func (m *MockReader) Network() *networks.Network {
 func (mr *MockReaderMockRecorder) Network() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Network", reflect.TypeOf((*MockReader)(nil).Network))
+}
+
+// NewHeaderSnapshot mocks base method.
+func (m *MockReader) NewHeaderSnapshot(arg0 context.Context) (blockchain.HeaderSnapshot, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NewHeaderSnapshot", arg0)
+	ret0, _ := ret[0].(blockchain.HeaderSnapshot)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// NewHeaderSnapshot indicates an expected call of NewHeaderSnapshot.
+func (mr *MockReaderMockRecorder) NewHeaderSnapshot(arg0 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NewHeaderSnapshot", reflect.TypeOf((*MockReader)(nil).NewHeaderSnapshot), arg0)
 }
 
 // Receipt mocks base method.

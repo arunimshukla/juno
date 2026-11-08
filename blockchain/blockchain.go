@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"iter"
@@ -34,6 +35,7 @@ type PreConfirmedReader interface {
 //go:generate mockgen -destination=../mocks/mock_blockchain.go -package=mocks github.com/NethermindEth/juno/blockchain Reader
 type Reader interface {
 	Height() (height uint64, err error)
+	NewHeaderSnapshot(context.Context) (HeaderSnapshot, error)
 
 	Head() (head *core.Block, err error)
 	L1Head() (core.L1Head, error)
