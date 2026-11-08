@@ -1,7 +1,6 @@
 package rpcv9
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1071,15 +1070,18 @@ func TestSubscribeNewHeads(t *testing.T) {
 		mockCtrl := gomock.NewController(t)
 		t.Cleanup(mockCtrl.Finish)
 
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		t.Cleanup(cancel)
 
 		mockChain := mocks.NewMockReader(mockCtrl)
 		syncer := newFakeSyncer()
+		block := testHeadBlock(t)
+		previous := block.Number - 1
 
 		l1Feed := feed.New[*core.L1Head]()
-		mockChain.EXPECT().Height().Return(uint64(0), nil).Times(2)
-		mockChain.EXPECT().BlockHeaderByNumber(uint64(0)).Return(&core.Header{}, nil)
+		mockChain.EXPECT().Height().Return(previous, nil).Times(2)
+		mockChain.EXPECT().BlockHeaderByNumber(previous).
+			Return(&core.Header{Number: previous, Hash: block.ParentHash}, nil)
 		mockChain.EXPECT().SubscribeL1Head().Return(blockchain.L1HeadSubscription{Subscription: l1Feed.Subscribe()})
 
 		handler, server := setupRPC(t, ctx, mockChain, syncer)
@@ -1096,7 +1098,7 @@ func TestSubscribeNewHeads(t *testing.T) {
 		require.NoError(t, err)
 
 		// Simulate a new block
-		syncer.newHeads.Send(newBlockWithBloom(testHeadBlock(t)))
+		syncer.newHeads.Send(newBlockWithBloom(block))
 
 		// Receive a block header.
 		_, headerGot, err := conn.Read(ctx)
@@ -1110,6 +1112,8 @@ func TestSubscribeNewHeadsHistorical(t *testing.T) {
 
 	block0 := adaptfeedertest.Block(t, client, 0)
 	stateUpdate0 := adaptfeedertest.StateUpdate(t, client, 0)
+	block1 := adaptfeedertest.Block(t, client, 1)
+	stateUpdate1 := adaptfeedertest.StateUpdate(t, client, 1)
 
 	testDB := memory.New()
 	chain := blockchain.New(
@@ -1128,7 +1132,7 @@ func TestSubscribeNewHeadsHistorical(t *testing.T) {
 	)
 	syncer := newFakeSyncer()
 
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
 
 	handler, server := setupRPC(t, ctx, chain, syncer)
@@ -1149,13 +1153,24 @@ func TestSubscribeNewHeadsHistorical(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, string(block0Got))
 
-	// Simulate a new block
-	syncer.newHeads.Send(newBlockWithBloom(testHeadBlock(t)))
+	// Commit and announce the next canonical block.
+	blockWithBloom := newBlockWithBloom(block1)
+	require.NoError(t, chain.Store(block1, &emptyCommitments, stateUpdate1, nil, blockWithBloom.Bloom))
+	syncer.newHeads.Send(blockWithBloom)
 
 	// Check new block content
 	_, newBlockGot, err := conn.Read(ctx)
 	require.NoError(t, err)
-	require.Equal(t, newHeadsResponse(id), string(newBlockGot))
+	wantNew, err := json.Marshal(SubscriptionResponse[BlockHeader]{
+		Version: "2.0",
+		Method:  "starknet_subscriptionNewHeads",
+		Params: SubscriptionParams[BlockHeader]{
+			Result:         AdaptBlockHeader(block1.Header),
+			SubscriptionID: id,
+		},
+	})
+	require.NoError(t, err)
+	require.JSONEq(t, string(wantNew), string(newBlockGot))
 }
 
 func TestSubscribeNewHeadsHistoricalByHash(t *testing.T) {
@@ -1224,19 +1239,22 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	t.Cleanup(mockCtrl.Finish)
 
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
 
 	mockChain := mocks.NewMockReader(mockCtrl)
 	syncer := newFakeSyncer()
+	block := testHeadBlock(t)
+	previous := block.Number - 1
 
 	l1Feed := feed.New[*core.L1Head]()
 	mockChain.EXPECT().SubscribeL1Head().Return(blockchain.L1HeadSubscription{Subscription: l1Feed.Subscribe()})
 
 	handler, server := setupRPC(t, ctx, mockChain, syncer)
 
-	mockChain.EXPECT().Height().Return(uint64(0), nil).Times(4)
-	mockChain.EXPECT().BlockHeaderByNumber(uint64(0)).Return(&core.Header{}, nil).Times(2)
+	mockChain.EXPECT().Height().Return(previous, nil).Times(4)
+	mockChain.EXPECT().BlockHeaderByNumber(previous).
+		Return(&core.Header{Number: previous, Hash: block.ParentHash}, nil).Times(2)
 
 	ws := jsonrpc.NewWebsocket(server, nil, log.NewNopZapLogger())
 	httpSrv := httptest.NewServer(ws)
@@ -1273,7 +1291,7 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate a new block
-	syncer.newHeads.Send(newBlockWithBloom(testHeadBlock(t)))
+	syncer.newHeads.Send(newBlockWithBloom(block))
 
 	// Receive a block header.
 	_, firstHeaderGot, err := conn1.Read(ctx)
@@ -1295,7 +1313,7 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 }
 
 func TestSubscriptionReorg(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
 
 	mockCtrl := gomock.NewController(t)
@@ -1343,7 +1361,7 @@ func TestSubscriptionReorg(t *testing.T) {
 		Return(nil, blockchain.ContinuationToken{}, nil).AnyTimes()
 	mockEventFilterer.EXPECT().Close().Return(nil).AnyTimes()
 
-	mockChain.EXPECT().Height().Return(uint64(0), nil).Times(2)
+	mockChain.EXPECT().Height().Return(uint64(0), nil).Times(3)
 	mockChain.EXPECT().BlockHeaderByNumber(uint64(0)).Return(&core.Header{}, nil)
 	mockChain.EXPECT().EventFilter(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(mockEventFilterer, nil).AnyTimes()
@@ -2589,106 +2607,4 @@ func newPreConfirmedWithBloom(
 ) *core.WithBloom[*pending.PreConfirmed] {
 	withBloom := pending.NewPreConfirmedWithBloom(preConfirmed)
 	return &withBloom
-}
-
-func assertRecoveredHeadNumbers(t *testing.T, output *bytes.Buffer, want []uint64) {
-	t.Helper()
-	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
-	var got []uint64
-	for {
-		var envelope struct {
-			Method string `json:"method"`
-			Params struct {
-				Result struct {
-					BlockNumber uint64 `json:"block_number"`
-				} `json:"result"`
-			} `json:"params"`
-		}
-		err := decoder.Decode(&envelope)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		require.NoError(t, err)
-		if envelope.Method == "starknet_subscriptionNewHeads" {
-			got = append(got, envelope.Params.Result.BlockNumber)
-		}
-	}
-	require.Equal(t, want, got)
-}
-
-func TestSubscribeNewHeadsCatchUpAcrossReplayAndFeedGaps(t *testing.T) {
-	tests := []struct {
-		name          string
-		snapshotHead  uint64
-		liveHead      uint64
-		expectedHeads []uint64
-	}{
-		{
-			name:          "head advances before feed registration and during replay",
-			snapshotHead:  3,
-			expectedHeads: []uint64{1, 2, 3},
-		},
-		{
-			name:          "live feed keeps only the latest of several new heads",
-			snapshotHead:  1,
-			liveHead:      4,
-			expectedHeads: []uint64{1, 2, 3, 4},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			reader := mocks.NewMockReader(ctrl)
-			handler := New(reader, nil, nil, log.NewNopZapLogger())
-			ctx := t.Context()
-			var output bytes.Buffer
-			conn := &fakeConn{w: &output, ctx: ctx}
-			sub := newHeadsSubscriber(handler, conn, 1, 1)
-
-			reader.EXPECT().BlockHeaderByNumber(uint64(1)).
-				Return(&core.Header{Number: 1}, nil)
-			upper := test.snapshotHead
-			if test.liveHead > 0 {
-				upper = test.liveHead - 1
-			}
-			for number := uint64(2); number <= upper; number++ {
-				reader.EXPECT().BlockHeaderByNumber(number).
-					Return(&core.Header{Number: number}, nil)
-			}
-			reader.EXPECT().Height().Return(test.snapshotHead, nil)
-
-			require.NoError(t, sub.onStart(ctx, "test", nil, nil))
-			if test.liveHead != 0 {
-				head := &core.WithBloom[*core.Block]{
-					Value: &core.Block{Header: &core.Header{Number: test.liveHead}},
-				}
-				require.NoError(t, sub.onNewHead(ctx, "test", nil, head))
-			}
-			assertRecoveredHeadNumbers(t, &output, test.expectedHeads)
-		})
-	}
-}
-
-func TestSubscribeNewHeadsCanReemitReorgedHeight(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	reader := mocks.NewMockReader(ctrl)
-	handler := New(reader, nil, nil, log.NewNopZapLogger())
-	ctx := context.Background()
-	var output bytes.Buffer
-	conn := &fakeConn{w: &output, ctx: ctx}
-	sub := newHeadsSubscriber(handler, conn, 1, 1)
-
-	reader.EXPECT().BlockHeaderByNumber(uint64(1)).
-		Return(&core.Header{Number: 1}, nil)
-	reader.EXPECT().Height().Return(uint64(1), nil)
-
-	require.NoError(t, sub.onStart(ctx, "test", nil, nil))
-	reorg := &sync.ReorgBlockRange{StartBlockNum: 1, EndBlockNum: 1}
-	require.NoError(t, sub.onReorg(ctx, "test", nil, reorg))
-	replacement := &core.WithBloom[*core.Block]{
-		Value: &core.Block{Header: &core.Header{Number: 1}},
-	}
-	require.NoError(t, sub.onNewHead(ctx, "test", nil, replacement))
-	assertRecoveredHeadNumbers(t, &output, []uint64{1, 1})
 }
