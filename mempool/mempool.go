@@ -53,6 +53,10 @@ type memTxnList struct {
 func (t *memTxnList) push(newNode *memPoolTxn) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.appendLocked(newNode)
+}
+
+func (t *memTxnList) appendLocked(newNode *memPoolTxn) {
 	if t.tail != nil {
 		t.tail.Next = newNode
 		t.tail = newNode
@@ -245,6 +249,29 @@ func (p *SequencerMempool) Push(ctx context.Context, userTxn *BroadcastedTransac
 		return err
 	}
 
+	if err := p.tryEnqueue(userTxn); err != nil {
+		return err
+	}
+	p.logger.Debug("successfully pushed transaction to the mempool")
+
+	select {
+	case p.txPushed <- struct{}{}:
+	default:
+	}
+
+	return nil
+}
+
+func (p *SequencerMempool) tryEnqueue(userTxn *BroadcastedTransaction) error {
+	list := p.memTxnList
+	list.mu.Lock()
+	defer list.mu.Unlock()
+
+	if list.len+1 >= p.maxNumTxns {
+		return ErrTxnPoolFull
+	}
+
+	// Queue persistence before making the transaction visible to Pop or PopBatch.
 	select {
 	case p.dbWriteChan <- userTxn:
 	default:
@@ -261,20 +288,12 @@ func (p *SequencerMempool) Push(ctx context.Context, userTxn *BroadcastedTransac
 		}
 	}
 
-	newNode := &memPoolTxn{Txn: *userTxn, Next: nil}
-	p.memTxnList.push(newNode)
-	p.logger.Debug("successfully pushed transaction to the mempool")
-
-	select {
-	case p.txPushed <- struct{}{}:
-	default:
-	}
-
+	list.appendLocked(&memPoolTxn{Txn: *userTxn})
 	return nil
 }
 
 func (p *SequencerMempool) validate(userTxn *BroadcastedTransaction) error {
-	if p.memTxnList.len+1 >= p.maxNumTxns {
+	if p.Len()+1 >= p.maxNumTxns {
 		return ErrTxnPoolFull
 	}
 
@@ -344,6 +363,8 @@ func (p *SequencerMempool) Remove(hash ...*felt.Felt) error {
 
 // Len returns the number of transactions in the in-memory pool
 func (p *SequencerMempool) Len() int {
+	p.memTxnList.mu.Lock()
+	defer p.memTxnList.mu.Unlock()
 	return p.memTxnList.len
 }
 
