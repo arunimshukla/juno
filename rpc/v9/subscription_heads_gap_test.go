@@ -80,12 +80,8 @@ func TestSubscribeNewHeadsCatchUpAcrossReplayAndFeedGaps(t *testing.T) {
 			for number := uint64(2); number <= upper; number++ {
 				reader.EXPECT().BlockHeaderByNumber(number).
 					Return(&core.Header{Number: number}, nil)
-				
 			}
 			reader.EXPECT().Height().Return(test.snapshotHead, nil)
-			if test.liveHead != 0 {
-				
-			}
 
 			require.NoError(t, sub.onStart(ctx, "test", nil, nil))
 			if test.liveHead != 0 {
