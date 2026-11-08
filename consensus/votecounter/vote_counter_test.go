@@ -211,3 +211,77 @@ func TestThresholds(t *testing.T) {
 		assert.True(t, 2*(q(test.n)-1) <= test.n+f(test.n))
 	}
 }
+
+type changingValidatorSet struct {
+	*mockValidator
+	futureHeight      types.Height
+	futureVotingPower map[starknet.Address]types.VotingPower
+}
+
+func (v changingValidatorSet) TotalVotingPower(height types.Height) types.VotingPower {
+	if height != v.futureHeight {
+		return v.mockValidator.TotalVotingPower(height)
+	}
+
+	var total types.VotingPower
+	for _, power := range v.futureVotingPower {
+		total += power
+	}
+	return total
+}
+
+func (v changingValidatorSet) ValidatorVotingPower(
+	height types.Height,
+	addr *starknet.Address,
+) types.VotingPower {
+	if height != v.futureHeight {
+		return v.mockValidator.ValidatorVotingPower(height, addr)
+	}
+	return v.futureVotingPower[*addr]
+}
+
+// Future precommits are weighted using the validator set at their message height.
+// Their quorum threshold must be derived from that same height.
+func TestFuturePrecommitQuorumUsesFutureValidatorSet(t *testing.T) {
+	tests := []struct {
+		name           string
+		currentPower   map[starknet.Address]types.VotingPower
+		futurePower    map[starknet.Address]types.VotingPower
+		expectedQuorum bool
+	}{
+		{
+			name:           "increased future power must not trigger premature quorum",
+			currentPower:   buildVotingPower(1, 1, 1, 1),
+			futurePower:    buildVotingPower(1, 1, 1, 1, 1, 1, 1),
+			expectedQuorum: false,
+		},
+		{
+			name:           "decreased future power must recognise valid quorum",
+			currentPower:   buildVotingPower(1, 1, 1, 1, 1, 1, 1),
+			futurePower:    buildVotingPower(1, 1, 1, 1),
+			expectedQuorum: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			validators := changingValidatorSet{
+				mockValidator:    newMockValidator(0, test.currentPower),
+				futureHeight:     testHeight + 1,
+				futureVotingPower: test.futurePower,
+			}
+			counter := New[starknet.Value](validators, testHeight)
+			for i := range uint64(3) {
+				precommit := voter(i).precommit(0).vote
+				precommit.Height = testHeight + 1
+				assert.True(t, counter.AddPrecommit((*starknet.Precommit)(&precommit)))
+			}
+
+			id := voter(0).precommit(0).vote.ID
+			assert.Equal(
+				t, test.expectedQuorum,
+				counter.HasFuturePrecommitQuorum(testHeight+1, testRound, id),
+			)
+		})
+	}
+}
