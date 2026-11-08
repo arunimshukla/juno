@@ -1265,7 +1265,7 @@ func TestSubscribeNewHeads(t *testing.T) {
 	mockChain := mocks.NewMockReader(mockCtrl)
 	handler := New(mockChain, nil, nil, logger)
 
-	mockChain.EXPECT().Height().Return(block1.Number, nil)
+	mockChain.EXPECT().Height().Return(block1.Number, nil).Times(2)
 
 	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
 	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
@@ -1310,7 +1310,7 @@ func TestSubscribeNewHeadsHistorical(t *testing.T) {
 	mockChain := mocks.NewMockReader(mockCtrl)
 	handler := New(mockChain, nil, nil, logger)
 
-	mockChain.EXPECT().Height().Return(block2.Number, nil)
+	mockChain.EXPECT().Height().Return(block2.Number, nil).Times(2)
 	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
 	mockChain.EXPECT().BlockHeaderByNumber(block2.Number).Return(block2.Header, nil)
 
@@ -1353,7 +1353,7 @@ func TestSubscribeNewHeadsHistoricalByHash(t *testing.T) {
 	mockChain := mocks.NewMockReader(mockCtrl)
 	handler := New(mockChain, nil, nil, logger)
 
-	mockChain.EXPECT().Height().Return(block2.Number, nil)
+	mockChain.EXPECT().Height().Return(block2.Number, nil).Times(2)
 	mockChain.EXPECT().BlockNumberByHash(block1.Hash).Return(block1.Number, nil)
 	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
 	mockChain.EXPECT().BlockHeaderByNumber(block2.Number).Return(block2.Header, nil)
@@ -1389,7 +1389,7 @@ func TestSubscribeNewHeadsReturnsReorgNotification(t *testing.T) {
 	mockChain := mocks.NewMockReader(mockCtrl)
 	handler := New(mockChain, nil, nil, logger)
 
-	mockChain.EXPECT().Height().Return(block1.Number, nil)
+	mockChain.EXPECT().Height().Return(block1.Number, nil).Times(2)
 
 	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil)
 	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil)
@@ -1443,7 +1443,7 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 	mockChain := mocks.NewMockReader(mockCtrl)
 	handler := New(mockChain, nil, nil, logger)
 
-	mockChain.EXPECT().Height().Return(block1.Number, nil).Times(2)
+	mockChain.EXPECT().Height().Return(block1.Number, nil).Times(4)
 	mockChain.EXPECT().BlockHeaderByNumber(block1.Number).Return(block1.Header, nil).Times(2)
 	mockChain.EXPECT().BlockCommitmentsByNumber(block1.Number).Return(commitments1, nil).Times(2)
 
