@@ -445,8 +445,20 @@ func (s *Server) HandleReader(ctx context.Context, reader io.Reader) ([]byte, ht
 		return nil, header, nil
 	}
 
-	result, err := jsonv1.Marshal(resp)
+	result, err := s.marshalResponse(resp)
 	return result, header, err
+}
+
+func (s *Server) marshalResponse(resp *response) ([]byte, error) {
+	result, err := jsonv1.Marshal(resp)
+	if err == nil {
+		return result, nil
+	}
+
+	s.logger.Error("failed to marshal response", zap.Error(err))
+	fallback := errResponse(InternalError, nil)
+	fallback.ID = resp.ID
+	return jsonv1.Marshal(fallback)
 }
 
 //nolint:gocyclo // one loop handling every step for each request in the batch
@@ -462,10 +474,10 @@ func (s *Server) handleBatchRequest(
 		totalBytes = 1
 	)
 
-	addResponse := func(response any, header http.Header) {
-		responseJSON, err := jsonv1.Marshal(response)
+	addResponse := func(resp *response, header http.Header) {
+		responseJSON, err := s.marshalResponse(resp)
 		if err != nil {
-			s.logger.Error("failed to marshal response", zap.Error(err))
+			s.logger.Error("failed to marshal internal-error response", zap.Error(err))
 			return
 		}
 
@@ -491,7 +503,7 @@ func (s *Server) handleBatchRequest(
 	for _, rawReq := range batchReq {
 		req := new(Request)
 		if err := unmarshal(rawReq, req); err != nil {
-			addResponse(errResponse(InvalidRequest, err.Error()), http.Header{})
+			addResponse(new(errResponse(InvalidRequest, err.Error())), http.Header{})
 			continue
 		}
 
@@ -500,7 +512,7 @@ func (s *Server) handleBatchRequest(
 			if req.ID != nil && validID(req.ID) {
 				resp := errResponse(ResponseTooLarge, nil)
 				resp.ID = req.ID
-				addResponse(resp, http.Header{})
+				addResponse(&resp, http.Header{})
 			}
 			continue
 		}
