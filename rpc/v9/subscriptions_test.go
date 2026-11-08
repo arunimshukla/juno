@@ -1077,7 +1077,7 @@ func TestSubscribeNewHeads(t *testing.T) {
 		syncer := newFakeSyncer()
 
 		l1Feed := feed.New[*core.L1Head]()
-		mockChain.EXPECT().Height().Return(uint64(0), nil)
+		mockChain.EXPECT().Height().Return(uint64(0), nil).Times(2)
 		mockChain.EXPECT().BlockHeaderByNumber(uint64(0)).Return(&core.Header{}, nil)
 		mockChain.EXPECT().SubscribeL1Head().Return(blockchain.L1HeadSubscription{Subscription: l1Feed.Subscribe()})
 
@@ -1234,7 +1234,7 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 
 	handler, server := setupRPC(t, ctx, mockChain, syncer)
 
-	mockChain.EXPECT().Height().Return(uint64(0), nil).Times(2)
+	mockChain.EXPECT().Height().Return(uint64(0), nil).Times(4)
 	mockChain.EXPECT().BlockHeaderByNumber(uint64(0)).Return(&core.Header{}, nil).Times(2)
 
 	ws := jsonrpc.NewWebsocket(server, nil, log.NewNopZapLogger())
