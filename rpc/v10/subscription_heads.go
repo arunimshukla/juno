@@ -33,8 +33,9 @@ func (h *Handler) SubscribeNewHeads(
 }
 
 type headsSubscriberState struct {
-	handler *Handler
-	conn    jsonrpc.Conn
+	handler   *Handler
+	conn      jsonrpc.Conn
+	nextBlock uint64 // next canonical header to emit
 }
 
 func newHeadsSubscriber(
@@ -43,11 +44,23 @@ func newHeadsSubscriber(
 	startBlock,
 	latestBlock uint64,
 ) subscriber {
-	state := &headsSubscriberState{handler: h, conn: conn}
+	state := &headsSubscriberState{handler: h, conn: conn, nextBlock: startBlock}
 
 	return subscriber{
 		onStart: func(ctx context.Context, id string, _ *subscription, _ any) error {
-			return state.sendHistoricalHeaders(ctx, id, startBlock, latestBlock)
+			if err := state.sendHistoricalHeaders(ctx, id, startBlock, latestBlock); err != nil {
+				return err
+			}
+			// The feed is already registered. Catch blocks committed after resolveBlockRange
+			// but before/during replay, even if the one-element feed coalesced them.
+			head, err := h.bcReader.Height()
+			if err != nil {
+				return err
+			}
+			if state.nextBlock <= head {
+				return state.sendHistoricalHeaders(ctx, id, state.nextBlock, head)
+			}
+			return nil
 		},
 		onReorg:   state.onReorg,
 		onNewHead: state.onNewHead,
@@ -60,23 +73,42 @@ func (s *headsSubscriberState) onReorg(
 	_ *subscription,
 	reorg *sync.ReorgBlockRange,
 ) error {
-	return sendReorg(s.conn, reorg, id)
+	if err := sendReorg(s.conn, reorg, id); err != nil {
+		return err
+	}
+	// A reverted block number can be emitted again on the replacement chain.
+	if reorg.StartBlockNum < s.nextBlock {
+		s.nextBlock = reorg.StartBlockNum
+	}
+	return nil
 }
 
 func (s *headsSubscriberState) onNewHead(
-	_ context.Context,
+	ctx context.Context,
 	id string,
 	_ *subscription,
 	headWithBloom *core.WithBloom[*core.Block],
 ) error {
 	head := headWithBloom.Value
+	if head.Number < s.nextBlock {
+		return nil // already emitted by replay or by an earlier feed notification
+	}
+	if head.Number > s.nextBlock {
+		if err := s.sendHistoricalHeaders(ctx, id, s.nextBlock, head.Number-1); err != nil {
+			return err
+		}
+	}
+
 	commitments, err := s.handler.bcReader.BlockCommitmentsByNumber(head.Number)
 	if err != nil {
 		return err
 	}
-
 	adaptedHeader := AdaptBlockHeader(head.Header, commitments)
-	return sendHeader(s.conn, &adaptedHeader, id)
+	if err = sendHeader(s.conn, &adaptedHeader, id); err != nil {
+		return err
+	}
+	s.nextBlock = head.Number + 1
+	return nil
 }
 
 func (s *headsSubscriberState) sendHistoricalHeaders(
@@ -106,6 +138,7 @@ func (s *headsSubscriberState) sendHistoricalHeaders(
 		if err = sendHeader(s.conn, &adaptedHeader, id); err != nil {
 			return err
 		}
+		s.nextBlock = currentBlock + 1
 	}
 	return nil
 }
