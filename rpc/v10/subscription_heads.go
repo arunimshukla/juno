@@ -4,7 +4,9 @@ import (
 	"context"
 
 	"github.com/NethermindEth/juno/core"
+	"github.com/NethermindEth/juno/core/felt"
 	"github.com/NethermindEth/juno/jsonrpc"
+	"github.com/NethermindEth/juno/rpc/rpccore"
 	"github.com/NethermindEth/juno/sync"
 )
 
@@ -29,118 +31,34 @@ func (h *Handler) SubscribeNewHeads(
 		return "", rpcErr
 	}
 
-	return h.subscribe(wsConn, newHeadsSubscriber(h, wsConn, startBlock, latestBlock))
-}
-
-type headsSubscriberState struct {
-	handler   *Handler
-	conn      jsonrpc.Conn
-	nextBlock uint64 // next canonical header to emit
-}
-
-func newHeadsSubscriber(
-	h *Handler,
-	conn jsonrpc.Conn,
-	startBlock,
-	latestBlock uint64,
-) subscriber {
-	state := &headsSubscriberState{handler: h, conn: conn, nextBlock: startBlock}
-
-	return subscriber{
+	var startHash *felt.Felt
+	if blockID != nil && blockID.IsHash() {
+		startHash = blockID.Hash()
+	}
+	stream := rpccore.NewHeadStream(h.bcReader, startBlock, latestBlock, startHash, true)
+	catchUp := func(ctx context.Context, id string) error {
+		return stream.CatchUp(
+			ctx,
+			func(header *core.Header, commitments *core.BlockCommitments) error {
+				adaptedHeader := AdaptBlockHeader(header, commitments)
+				return sendHeader(wsConn, &adaptedHeader, id)
+			},
+			func(reorg *sync.ReorgBlockRange) error { return sendReorg(wsConn, reorg, id) },
+		)
+	}
+	return h.subscribe(wsConn, subscriber{
 		onStart: func(ctx context.Context, id string, _ *subscription, _ any) error {
-			if err := state.sendHistoricalHeaders(ctx, id, startBlock, latestBlock); err != nil {
-				return err
-			}
-			// The feed is already registered. Catch blocks committed after resolveBlockRange
-			// but before/during replay, even if the one-element feed coalesced them.
-			head, err := h.bcReader.Height()
-			if err != nil {
-				return err
-			}
-			if state.nextBlock <= head {
-				return state.sendHistoricalHeaders(ctx, id, state.nextBlock, head)
-			}
-			return nil
+			return catchUp(ctx, id)
 		},
-		onReorg:   state.onReorg,
-		onNewHead: state.onNewHead,
-	}
-}
-
-func (s *headsSubscriberState) onReorg(
-	_ context.Context,
-	id string,
-	_ *subscription,
-	reorg *sync.ReorgBlockRange,
-) error {
-	if err := sendReorg(s.conn, reorg, id); err != nil {
-		return err
-	}
-	// A reverted block number can be emitted again on the replacement chain.
-	if reorg.StartBlockNum < s.nextBlock {
-		s.nextBlock = reorg.StartBlockNum
-	}
-	return nil
-}
-
-func (s *headsSubscriberState) onNewHead(
-	ctx context.Context,
-	id string,
-	_ *subscription,
-	headWithBloom *core.WithBloom[*core.Block],
-) error {
-	head := headWithBloom.Value
-	if head.Number < s.nextBlock {
-		return nil // already emitted by replay or by an earlier feed notification
-	}
-	if head.Number > s.nextBlock {
-		if err := s.sendHistoricalHeaders(ctx, id, s.nextBlock, head.Number-1); err != nil {
-			return err
-		}
-	}
-
-	commitments, err := s.handler.bcReader.BlockCommitmentsByNumber(head.Number)
-	if err != nil {
-		return err
-	}
-	adaptedHeader := AdaptBlockHeader(head.Header, commitments)
-	if err = sendHeader(s.conn, &adaptedHeader, id); err != nil {
-		return err
-	}
-	s.nextBlock = head.Number + 1
-	return nil
-}
-
-func (s *headsSubscriberState) sendHistoricalHeaders(
-	ctx context.Context,
-	id string,
-	startBlock,
-	latestBlock uint64,
-) error {
-	for currentBlock := startBlock; currentBlock <= latestBlock; currentBlock++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		commitments, err := s.handler.bcReader.BlockCommitmentsByNumber(currentBlock)
-		if err != nil {
-			return err
-		}
-
-		currentHeader, err := s.handler.bcReader.BlockHeaderByNumber(currentBlock)
-		if err != nil {
-			return err
-		}
-
-		adaptedHeader := AdaptBlockHeader(currentHeader, commitments)
-		if err = sendHeader(s.conn, &adaptedHeader, id); err != nil {
-			return err
-		}
-		s.nextBlock = currentBlock + 1
-	}
-	return nil
+		onReorg: func(ctx context.Context, id string, _ *subscription, _ *sync.ReorgBlockRange) error {
+			return catchUp(ctx, id)
+		},
+		onNewHead: func(
+			ctx context.Context, id string, _ *subscription, _ *core.WithBloom[*core.Block],
+		) error {
+			return catchUp(ctx, id)
+		},
+	})
 }
 
 func sendHeader(wsConn jsonrpc.Conn, header *BlockHeader, id string) error {

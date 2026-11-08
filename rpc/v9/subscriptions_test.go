@@ -1067,24 +1067,18 @@ func TestSubscribeNewHeads(t *testing.T) {
 	})
 
 	t.Run("new block is received", func(t *testing.T) {
-		mockCtrl := gomock.NewController(t)
-		t.Cleanup(mockCtrl.Finish)
-
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		t.Cleanup(cancel)
 
-		mockChain := mocks.NewMockReader(mockCtrl)
 		syncer := newFakeSyncer()
 		block := testHeadBlock(t)
 		previous := block.Number - 1
 
-		l1Feed := feed.New[*core.L1Head]()
-		mockChain.EXPECT().Height().Return(previous, nil).Times(2)
-		mockChain.EXPECT().BlockHeaderByNumber(previous).
-			Return(&core.Header{Number: previous, Hash: block.ParentHash}, nil)
-		mockChain.EXPECT().SubscribeL1Head().Return(blockchain.L1HeadSubscription{Subscription: l1Feed.Subscribe()})
-
-		handler, server := setupRPC(t, ctx, mockChain, syncer)
+		database := memory.New()
+		t.Cleanup(func() { require.NoError(t, database.Close()) })
+		chain := blockchain.New(database, &networks.Sepolia)
+		storeNewHead(t, database, &core.Header{Number: previous, Hash: block.ParentHash})
+		handler, server := setupRPC(t, ctx, chain, syncer)
 		conn := createWsConn(t, ctx, server)
 
 		id := "1"
@@ -1098,6 +1092,7 @@ func TestSubscribeNewHeads(t *testing.T) {
 		require.NoError(t, err)
 
 		// Simulate a new block
+		storeNewHead(t, database, block.Header)
 		syncer.newHeads.Send(newBlockWithBloom(block))
 
 		// Receive a block header.
@@ -1236,25 +1231,18 @@ func TestSubscribeNewHeadsHistoricalByHash(t *testing.T) {
 }
 
 func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
-	mockCtrl := gomock.NewController(t)
-	t.Cleanup(mockCtrl.Finish)
-
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	t.Cleanup(cancel)
 
-	mockChain := mocks.NewMockReader(mockCtrl)
 	syncer := newFakeSyncer()
 	block := testHeadBlock(t)
 	previous := block.Number - 1
 
-	l1Feed := feed.New[*core.L1Head]()
-	mockChain.EXPECT().SubscribeL1Head().Return(blockchain.L1HeadSubscription{Subscription: l1Feed.Subscribe()})
-
-	handler, server := setupRPC(t, ctx, mockChain, syncer)
-
-	mockChain.EXPECT().Height().Return(previous, nil).Times(4)
-	mockChain.EXPECT().BlockHeaderByNumber(previous).
-		Return(&core.Header{Number: previous, Hash: block.ParentHash}, nil).Times(2)
+	database := memory.New()
+	t.Cleanup(func() { require.NoError(t, database.Close()) })
+	chain := blockchain.New(database, &networks.Sepolia)
+	storeNewHead(t, database, &core.Header{Number: previous, Hash: block.ParentHash})
+	handler, server := setupRPC(t, ctx, chain, syncer)
 
 	ws := jsonrpc.NewWebsocket(server, nil, log.NewNopZapLogger())
 	httpSrv := httptest.NewServer(ws)
@@ -1291,6 +1279,7 @@ func TestMultipleSubscribeNewHeadsAndUnsubscribe(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate a new block
+	storeNewHead(t, database, block.Header)
 	syncer.newHeads.Send(newBlockWithBloom(block))
 
 	// Receive a block header.
@@ -1329,27 +1318,18 @@ func TestSubscriptionReorg(t *testing.T) {
 	testCases := []struct {
 		name            string
 		subscribeMethod string
-		ignoreFirst     bool
 	}{
-		{
-			name:            "reorg event in starknet_subscribeNewHeads",
-			subscribeMethod: "starknet_subscribeNewHeads",
-			ignoreFirst:     true,
-		},
 		{
 			name:            "reorg event in starknet_subscribeEvents",
 			subscribeMethod: "starknet_subscribeEvents",
-			ignoreFirst:     false,
 		},
 		{
 			name:            "reorg event in starknet_subscribeNewTransactionReceipts",
 			subscribeMethod: "starknet_subscribeNewTransactionReceipts",
-			ignoreFirst:     false,
 		},
 		{
 			name:            "reorg event in starknet_subscribeNewTransactions",
 			subscribeMethod: "starknet_subscribeNewTransactions",
-			ignoreFirst:     false,
 		},
 		// TODO: test reorg event in TransactionStatus
 	}
@@ -1361,8 +1341,7 @@ func TestSubscriptionReorg(t *testing.T) {
 		Return(nil, blockchain.ContinuationToken{}, nil).AnyTimes()
 	mockEventFilterer.EXPECT().Close().Return(nil).AnyTimes()
 
-	mockChain.EXPECT().Height().Return(uint64(0), nil).Times(3)
-	mockChain.EXPECT().BlockHeaderByNumber(uint64(0)).Return(&core.Header{}, nil)
+	mockChain.EXPECT().Height().Return(uint64(0), nil)
 	mockChain.EXPECT().EventFilter(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(mockEventFilterer, nil).AnyTimes()
 
@@ -1375,11 +1354,6 @@ func TestSubscriptionReorg(t *testing.T) {
 
 			got := sendWsMessage(t, ctx, conn, subMsg(tc.subscribeMethod))
 			require.Equal(t, subResp(id), got)
-
-			if tc.ignoreFirst {
-				_, _, err := conn.Read(ctx)
-				require.NoError(t, err)
-			}
 
 			// Simulate a reorg
 			syncer.reorgs.Send(&sync.ReorgBlockRange{
@@ -2304,6 +2278,16 @@ func subResp(id string) string {
 
 func subMsg(method string) string {
 	return fmt.Sprintf(`{"jsonrpc":"2.0","id":"1","method":%q}`, method)
+}
+
+func storeNewHead(t *testing.T, database db.KeyValueStore, header *core.Header) {
+	t.Helper()
+	require.NoError(t, database.Write(func(batch db.Batch) error {
+		if err := core.WriteBlockHeader(batch, header); err != nil {
+			return err
+		}
+		return core.ChainHeightBucket.Put(batch, struct{}{}, &header.Number)
+	}))
 }
 
 func testHeadBlock(t *testing.T) *core.Block {
